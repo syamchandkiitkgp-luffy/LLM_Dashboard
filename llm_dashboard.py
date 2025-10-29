@@ -1192,7 +1192,15 @@ selected_model = st.sidebar.selectbox(
 )
 
 # API Key (from environment)
-api_key = "AIzaSyCnu2PemH38f1iF4BdbaLcUbKbJSdxHkRE"
+try:
+    # Try Streamlit Secrets first (Cloud)
+    api_key = st.secrets["GEMINI_API_KEY"]
+except:
+    # Fallback to environment variable (Local)
+    api_key = os.getenv("GEMINI_API_KEY", "")
+
+if not api_key:
+    st.sidebar.warning("⚠️ No API key found")
 
 min_date = df['month'].min()
 max_date = df['month'].max()
@@ -1688,4 +1696,5 @@ with tab4:
 # Footer
 st.markdown("---")
 st.markdown(f"**Data Range:** {filtered_df['month'].min().strftime('%B %Y')} to {filtered_df['month'].max().strftime('%B %Y')} | **Total Records:** {len(filtered_df):,} | **Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
 
