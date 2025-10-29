@@ -1192,7 +1192,7 @@ selected_model = st.sidebar.selectbox(
 )
 
 # API Key (from environment)
-api_key = os.getenv("GEMINI_API_KEY", "AIzaSyCnu2PemH38f1iF4BdbaLcUbKbJSdxHkRE")
+api_key = "AIzaSyCnu2PemH38f1iF4BdbaLcUbKbJSdxHkRE"
 
 min_date = df['month'].min()
 max_date = df['month'].max()
@@ -1688,3 +1688,4 @@ with tab4:
 # Footer
 st.markdown("---")
 st.markdown(f"**Data Range:** {filtered_df['month'].min().strftime('%B %Y')} to {filtered_df['month'].max().strftime('%B %Y')} | **Total Records:** {len(filtered_df):,} | **Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
