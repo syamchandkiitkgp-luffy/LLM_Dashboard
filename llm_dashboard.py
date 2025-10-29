@@ -1,11 +1,3 @@
-"""
-ServiceNow Strategic Planning & Analytics Dashboard
-Complete Application with Data Generation and Visualization
-Includes Month-over-Month tracking for all KPIs
-With centered text in KPI metric boxes
-Plus Agentic AI-powered chatbot using Google Gemini API
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -220,7 +212,7 @@ Context: {context}
 Task: {prompt}
 """
             response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=selected_model,
                 contents=full_prompt,
             )
             return response.text
@@ -1170,7 +1162,20 @@ st.markdown("---")
 st.sidebar.header("🔍 Filters")
 
 # Gemini API Key input
-api_key = st.sidebar.text_input("🔑 Gemini API Key", value="AIzaSyBqxxgDhHmvjdAp-KtJk50_2OKauB47790", type="password")
+# Gemini Model Selection
+selected_model = st.sidebar.selectbox(
+    "🤖 Select Gemini Model",
+    [
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash"
+    ],
+    index=0,
+    help="Choose the Gemini model for AI assistant"
+)
+
+# API Key (hidden from UI, set in environment or code)
+api_key = os.getenv("GEMINI_API_KEY", "AIzaSyCnu2PemH38f1iF4BdbaLcUbKbJSdxHkRE")
 
 min_date = df['month'].min()
 max_date = df['month'].max()
@@ -1586,21 +1591,18 @@ with tab4:
                 for error in interaction["results"]["errors"]:
                     st.warning(error)
 
-        # Show result
-        if interaction["results"].get("result_df") is not None:
-            pass
+        # # Show result
+        # if interaction["results"].get("result_df") is not None:
             # st.markdown("### 📊 Data Result")
             # st.dataframe(interaction["results"]["result_df"].head(20), use_container_width=True)
 
         # Show visualization
         if interaction["results"].get("visualization"):
-            pass
             st.markdown("### 📈 Visualization")
             st.plotly_chart(interaction["results"]["visualization"], use_container_width=True)
 
         # Show summary
         if interaction["results"].get("summary"):
-            pass
             st.markdown(f'<div class="chat-message bot-message">{interaction["results"]["summary"]}</div>', unsafe_allow_html=True)
 
     # Input for new question
