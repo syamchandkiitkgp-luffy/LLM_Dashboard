@@ -17,6 +17,7 @@ import os
 import json
 import traceback
 from google import genai
+import time
 
 # ============================================================================
 # DATA DICTIONARY & METADATA
@@ -193,134 +194,296 @@ DATA_DICTIONARY = {
 }
 
 # ============================================================================
-# AGENTIC AI SYSTEM
+# ENHANCED AGENTIC AI SYSTEM WITH OUT-OF-CONTEXT HANDLING (2025)
 # ============================================================================
 
-class BaseAgent:
-    """Base class for all agents"""
+import time
+
+class ContextValidator:
+    """Validates if questions are within the dashboard data context"""
+
+    def __init__(self, api_key, data_dictionary):
+        self.api_key = api_key
+        self.client = genai.Client(api_key=api_key) if api_key else None
+        self.data_dictionary = data_dictionary
+
+    def validate_context(self, user_question):
+        """Determine if question is within data context or general knowledge"""
+
+        if not self.client:
+            return {"in_context": True, "confidence": 0.5, "reasoning": "No API key"}
+
+        # Get available metrics from data dictionary
+        available_metrics = list(self.data_dictionary.get("columns", {}).keys())
+
+        prompt = f"""You are a context validator for a ServiceNow analytics dashboard.
+
+AVAILABLE DATA CONTEXT:
+Dataset: {self.data_dictionary['dataset_info']['name']}
+Available Metrics: {', '.join(available_metrics[:30])}
+Time Period: {self.data_dictionary['dataset_info']['date_range']}
+Granularity: {self.data_dictionary['dataset_info']['granularity']}
+
+USER QUESTION: "{user_question}"
+
+TASK: Determine if this question can be answered using the available dashboard data.
+
+CLASSIFICATION RULES:
+1. IN-CONTEXT (answer with data):
+   - Questions about metrics in the available list
+   - Questions about trends, comparisons, aggregations
+   - Questions about specific clients, industries, time periods
+   - Examples: "What's the total MRR?", "Show top 10 clients", "MRR trend"
+
+2. OUT-OF-CONTEXT (answer with general knowledge):
+   - General questions about business concepts
+   - Questions about methodologies or best practices
+   - "What is..." or "How to..." questions not requiring data
+   - Examples: "What is MRR?", "How to improve churn?", "What is ServiceNow?"
+
+3. HYBRID (needs both data and knowledge):
+   - Requests for insights with explanations
+   - Examples: "Why is churn high and how to fix it?"
+
+OUTPUT FORMAT (JSON only):
+{{
+    "classification": "in_context" or "out_of_context" or "hybrid",
+    "confidence": 0.0 to 1.0,
+    "reasoning": "Brief explanation",
+    "suggested_approach": "data_analysis" or "knowledge_response" or "combined"
+}}
+
+RESPOND WITH JSON ONLY:"""
+
+        try:
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=prompt,
+                config={"temperature": 0.2}
+            )
+
+            # Parse response
+            response_text = response.text
+            if "```json" in response_text:
+                json_str = response_text.split("```json")[1].split("```")[0].strip()
+            elif "{" in response_text:
+                json_str = response_text[response_text.find("{"):response_text.rfind("}")+1]
+            else:
+                json_str = response_text
+
+            result = json.loads(json_str)
+            result.setdefault("classification", "in_context")
+            result.setdefault("confidence", 0.7)
+
+            return result
+
+        except Exception as e:
+            return {
+                "classification": "in_context",
+                "confidence": 0.5,
+                "reasoning": f"Error in validation: {str(e)}",
+                "suggested_approach": "data_analysis"
+            }
+
+
+class GeneralKnowledgeAgent:
+    """Handles out-of-context questions using general knowledge"""
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.client = genai.Client(api_key=api_key) if api_key else None
+
+    def answer_general_question(self, user_question, data_context=None):
+        """Answer general knowledge questions"""
+
+        if not self.client:
+            return "Unable to answer - API key required"
+
+        context_info = ""
+        if data_context:
+            context_info = f"""
+
+DASHBOARD CONTEXT (for reference):
+The user is viewing a ServiceNow Strategic Planning & Analytics Dashboard with:
+- Revenue metrics (MRR, ARR, Pipeline)
+- Customer health metrics (NPS, Health Score, Churn)
+- Renewal metrics (Days to renewal, Risk scores)
+- Partner metrics (Revenue, Engagement)
+
+You can reference this context if relevant to the question."""
+
+        prompt = f"""You are a senior business consultant and ServiceNow expert.
+
+USER QUESTION: "{user_question}"
+{context_info}
+
+INSTRUCTIONS:
+1. Provide a clear, professional answer
+2. Use business language (not technical jargon)
+3. Structure your response with headers if needed
+4. Include practical examples when helpful
+5. If the question relates to metrics, explain what they are and why they matter
+6. Keep it concise but comprehensive (200-400 words)
+
+FORMAT YOUR RESPONSE:
+- Use ## for main headers
+- Use bullet points for lists
+- Bold key terms with **term**
+- Provide actionable insights
+
+YOUR RESPONSE:"""
+
+        try:
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=prompt,
+                config={"temperature": 0.4, "max_output_tokens": 1000}
+            )
+            return response.text
+        except Exception as e:
+            return f"Error generating response: {str(e)}"
+
+
+class EnhancedBaseAgent:
+    """Enhanced base agent with retry logic and performance tracking"""
+
     def __init__(self, api_key, role, instructions):
         self.api_key = api_key
         self.role = role
         self.instructions = instructions
         self.client = genai.Client(api_key=api_key) if api_key else None
+        self.metrics = {"total_calls": 0, "successful_calls": 0, "errors": []}
 
-    def query(self, prompt, context=""):
-        """Query the Gemini API"""
+    def query(self, prompt, temperature=0.3, max_retries=2):
+        """Query with retry logic and exponential backoff"""
+
         if not self.client:
             return "Error: API key not provided"
 
-        try:
-            full_prompt = f"""Role: {self.role}
+        for attempt in range(max_retries + 1):
+            try:
+                self.metrics["total_calls"] += 1
 
-Instructions: {self.instructions}
+                full_prompt = f"""ROLE: {self.role}
 
-Context: {context}
+{self.instructions}
 
-Task: {prompt}
-"""
-            response = self.client.models.generate_content(
-                model="gemini-2.0-flash-exp",
-                contents=full_prompt,
-            )
-            return response.text
-        except Exception as e:
-            return f"Error: {str(e)}"
+TASK:
+{prompt}
 
-class OrchestratorAgent(BaseAgent):
-    """Orchestrator agent that decides which agents to call"""
+YOUR RESPONSE:"""
+
+                response = self.client.models.generate_content(
+                    model="gemini-2.0-flash-exp",
+                    contents=full_prompt,
+                    config={
+                        "temperature": temperature,
+                        "top_p": 0.95,
+                        "top_k": 40,
+                        "max_output_tokens": 2048
+                    }
+                )
+
+                self.metrics["successful_calls"] += 1
+                return response.text
+
+            except Exception as e:
+                if attempt < max_retries:
+                    time.sleep(2 ** attempt)
+                else:
+                    self.metrics["errors"].append(str(e))
+                    return f"Error: {str(e)}"
+
+        return "Error: Max retries exceeded"
+
+
+class EnhancedOrchestratorAgent(EnhancedBaseAgent):
+    """Orchestrator with context awareness"""
+
     def __init__(self, api_key):
-        role = "Orchestrator Agent"
-        instructions = """You are an orchestrator that analyzes user questions and decides which agents to call.
+        role = "Strategic Orchestrator"
+        instructions = """Analyze questions and plan optimal execution strategy.
 
-Available agents:
-1. python_coding_agent - For data processing, aggregations, filtering
-2. plotting_agent - For creating visualizations
-3. summarizing_agent - For providing executive summaries and insights
-
-Your task:
-- Analyze the user question
-- Decide which agents to call and in what order
-- Return a JSON with the plan
-
-Response format:
-{
-    "reasoning": "Why you chose this approach",
-    "agents": ["agent1", "agent2", "agent3"],
-    "needs_data_processing": true/false,
-    "needs_visualization": true/false,
-    "needs_summary": true/false
-}"""
+DECISION FRAMEWORK:
+- Data queries → Python coding
+- Visualizations → Plotting  
+- Insights → Summarizing
+- Complex analysis → Multiple agents"""
         super().__init__(api_key, role, instructions)
 
-    def plan_execution(self, user_question, data_summary):
-        """Plan which agents to execute"""
-        prompt = f"""User Question: {user_question}
+    def plan(self, user_question, df):
+        """Create execution plan"""
 
-Data Summary: {data_summary}
+        prompt = f"""Analyze: "{user_question}"
 
-Decide which agents to call to answer this question comprehensively."""
+Available data: {len(df)} rows, Columns: {', '.join(df.columns[:15].tolist())}
 
-        response = self.query(prompt)
+Determine needs:
+- Data processing? (aggregations, filtering)
+- Visualization? (charts, graphs)
+- Summary? (insights, recommendations)
 
-        # Parse JSON response
+OUTPUT JSON:
+{{"needs_data": true/false, "needs_viz": true/false, "needs_summary": true/false, "complexity": "low/medium/high"}}"""
+
+        response = self.query(prompt, temperature=0.2)
+
         try:
-            # Extract JSON from response
             if "```json" in response:
                 json_str = response.split("```json")[1].split("```")[0].strip()
-            elif "{" in response and "}" in response:
+            elif "{" in response:
                 json_str = response[response.find("{"):response.rfind("}")+1]
             else:
                 json_str = response
 
             plan = json.loads(json_str)
+            plan.setdefault("needs_data", True)
+            plan.setdefault("needs_viz", False)
+            plan.setdefault("needs_summary", True)
+
             return plan
         except:
-            # Default plan if parsing fails
-            return {
-                "reasoning": "Using default plan",
-                "agents": ["python_coding_agent", "summarizing_agent"],
-                "needs_data_processing": True,
-                "needs_visualization": False,
-                "needs_summary": True
-            }
+            return {"needs_data": True, "needs_viz": False, "needs_summary": True}
 
-class PythonCodingAgent(BaseAgent):
-    """Agent that writes Python code to process data"""
+
+class EnhancedPythonCodingAgent(EnhancedBaseAgent):
+    """Advanced coding with best practices"""
+
     def __init__(self, api_key):
-        role = "Python Coding Agent"
-        instructions = """You are an expert Python programmer specializing in data analysis with pandas.
+        role = "Expert Python Data Analyst"
+        instructions = """Write clean pandas code following best practices.
 
-Your task:
-- Write clean, efficient Python code to process the dataframe
-- Use pandas operations (groupby, agg, filter, etc.)
-- Return ONLY executable Python code
-- The input dataframe variable is named 'df'
-- Store result in a variable named 'result_df'
-- Do not include any explanations, only code
+RULES:
+✓ Input: df, Output: result_df
+✓ Handle nulls with .dropna() or .fillna()
+✓ Reset index after groupby
+✓ Use meaningful names
+✗ No print statements
+✗ No comments
 
-Example:
-result_df = df.groupby('month')['mrr'].sum().reset_index()"""
+PATTERNS:
+# Aggregation
+result_df = df[df['val']>0].groupby('cat')['val'].sum().reset_index()
+
+# Time series
+result_df = df.groupby('month')['metric'].sum().reset_index().sort_values('month')
+
+# Top N
+result_df = df.nlargest(10, 'value')[['name', 'value']]"""
         super().__init__(api_key, role, instructions)
 
-    def generate_code(self, user_question, data_dict):
-        """Generate Python code for data processing"""
-        context = f"""Data Dictionary:
-{json.dumps(data_dict, indent=2)}
+    def generate_code(self, task, df):
+        """Generate pandas code"""
 
-Available columns and their descriptions are provided above."""
+        prompt = f"""Task: {task}
 
-        prompt = f"""Generate Python pandas code to answer: {user_question}
+Columns: {', '.join(df.columns.tolist())}
+Shape: {df.shape}
 
-Requirements:
-- Input dataframe: df
-- Output dataframe: result_df
-- Use only columns available in the data dictionary
-- Code should be clean and executable
-- Return ONLY the code, no explanations"""
+Write pandas code (no markdown, no explanations):"""
 
-        code = self.query(prompt, context)
+        code = self.query(prompt, temperature=0.1)
 
-        # Clean code
         if "```python" in code:
             code = code.split("```python")[1].split("```")[0].strip()
         elif "```" in code:
@@ -328,76 +491,86 @@ Requirements:
 
         return code
 
-class PythonReviewAgent(BaseAgent):
-    """Agent that reviews and fixes Python code"""
-    def __init__(self, api_key):
-        role = "Python Review Agent"
-        instructions = """You are a code reviewer specializing in pandas and data processing.
 
-Your task:
-- Review the provided code for errors
-- Fix syntax errors, logic issues, or bugs
-- Ensure code follows pandas best practices
-- Return the corrected code ONLY
-- Do not include explanations"""
+class EnhancedPythonReviewAgent(EnhancedBaseAgent):
+    """Code reviewer with error patterns"""
+
+    def __init__(self, api_key):
+        role = "Senior Code Reviewer"
+        instructions = """Fix pandas code errors.
+
+ERROR PATTERNS:
+1. NameError → Check column names
+2. KeyError → Add .reset_index()
+3. ValueError → Handle empty data
+4. TypeError → Convert data types
+
+OUTPUT: Fixed code only."""
         super().__init__(api_key, role, instructions)
 
-    def review_and_fix(self, code, error_message=""):
-        """Review and fix Python code"""
-        prompt = f"""Review and fix this code:
+    def fix_code(self, code, error, columns):
+        """Fix broken code"""
+
+        prompt = f"""Fix this code:
 
 {code}
 
-Error (if any): {error_message}
+Error: {error}
+Columns: {', '.join(columns)}
 
-Return the corrected code only."""
+Return fixed code only:"""
 
-        fixed_code = self.query(prompt)
+        fixed = self.query(prompt, temperature=0.1)
 
-        # Clean code
-        if "```python" in fixed_code:
-            fixed_code = fixed_code.split("```python")[1].split("```")[0].strip()
-        elif "```" in fixed_code:
-            fixed_code = fixed_code.split("```")[1].split("```")[0].strip()
+        if "```python" in fixed:
+            fixed = fixed.split("```python")[1].split("```")[0].strip()
+        elif "```" in fixed:
+            fixed = fixed.split("```")[1].split("```")[0].strip()
 
-        return fixed_code
+        return fixed
 
-class PlottingAgent(BaseAgent):
-    """Agent that creates visualizations"""
+
+class EnhancedPlottingAgent(EnhancedBaseAgent):
+    """Plotting with null safety"""
+
     def __init__(self, api_key):
-        role = "Plotting Agent"
-        instructions = """You are a data visualization expert using Plotly.
+        role = "Data Visualization Expert"
+        instructions = """Create Plotly visualizations.
 
-Your task:
-- Analyze the processed dataframe
-- Recommend the best chart type (line, bar, pie, scatter, etc.)
-- Create Plotly code to generate the visualization
-- Return code that creates a 'fig' variable
+CHART TYPES:
+- Time series → LINE (px.line)
+- Categories → BAR (px.bar)
+- Part-whole → PIE (px.pie)
+- Distribution → HISTOGRAM
 
-Available: plotly.express as px, plotly.graph_objects as go
-Input dataframe: result_df"""
+CRITICAL:
+1. Remove nulls: result_df = result_df.dropna()
+2. Check empty: if len(result_df) == 0
+3. Variable: fig
+4. Height: 400-600px
+
+TEMPLATE:
+result_df = result_df.dropna()
+if len(result_df) > 0:
+    fig = px.line(result_df, x='x', y='y', title='Title')
+else:
+    fig = go.Figure()
+fig.update_layout(height=500)"""
         super().__init__(api_key, role, instructions)
 
-    def generate_plot_code(self, df_head, user_question):
-        """Generate Plotly code for visualization"""
-        context = f"""Dataframe preview (first 5 rows):
-{df_head}
+    def generate_visualization(self, task, result_df):
+        """Generate viz code"""
 
-Dataframe info:
-- Columns: {', '.join(df_head.columns.tolist()) if hasattr(df_head, 'columns') else 'N/A'}"""
+        df_info = f"Columns: {result_df.columns.tolist()}, Shape: {result_df.shape}"
 
-        prompt = f"""Create a Plotly visualization to answer: {user_question}
+        prompt = f"""Create chart for: {task}
 
-Requirements:
-- Input dataframe: result_df
-- Create a figure named: fig
-- Use appropriate chart type
-- Add title and labels
-- Return ONLY the code"""
+Data: {df_info}
 
-        code = self.query(prompt, context)
+Return code only (with null handling):"""
 
-        # Clean code
+        code = self.query(prompt, temperature=0.2)
+
         if "```python" in code:
             code = code.split("```python")[1].split("```")[0].strip()
         elif "```" in code:
@@ -405,140 +578,185 @@ Requirements:
 
         return code
 
-class SummarizingAgent(BaseAgent):
-    """Agent that provides executive summaries"""
+
+class EnhancedSummarizingAgent(EnhancedBaseAgent):
+    """Executive insights generator"""
+
     def __init__(self, api_key):
-        role = "Summarizing Agent - Executive Consultant"
-        instructions = """You are a senior business consultant providing insights to executives.
+        role = "Senior Business Consultant"
+        instructions = """Provide executive-level insights.
 
-Your task:
-- Analyze the data results
-- Provide clear, actionable insights
-- Use business language (avoid technical jargon)
-- Highlight key findings and recommendations
-- Structure as: Key Insights, Observations, Recommendations"""
-        super().__init__(api_key, role, instructions)  # FIXED: Removed 'self,' from here
+STRUCTURE:
+## Executive Summary (2-3 sentences)
+## Key Insights (3-5 bullets with numbers)
+## Recommendations (2-3 actionable items)
 
-    def summarize(self, user_question, data_result):
-        """Generate executive summary"""
-        context = f"""Data Result:
-{data_result}"""
+STYLE:
+✓ Business language
+✓ Specific numbers
+✓ Actionable advice
+✗ No technical jargon"""
+        super().__init__(api_key, role, instructions)
 
-        prompt = f"""Provide an executive summary for: {user_question}
+    def generate_summary(self, task, result_df):
+        """Generate insights"""
 
-Format your response with:
-## Key Insights
-- Main finding 1
-- Main finding 2
+        data_summary = result_df.head(15).to_string() if isinstance(result_df, pd.DataFrame) else str(result_df)
 
-## Observations
-- Detailed observation 1
-- Detailed observation 2
+        prompt = f"""Question: {task}
 
-## Recommendations
-- Action item 1
-- Action item 2"""
+Data:
+{data_summary}
 
-        summary = self.query(prompt, context)
-        return summary
+Provide executive insights:"""
 
-class AgenticChatbot:
-    """Main agentic chatbot coordinator"""
-    def __init__(self, api_key, df):
+        return self.query(prompt, temperature=0.4)
+
+
+class EnhancedAgenticChatbot:
+    """Enhanced chatbot with out-of-context handling"""
+
+    def __init__(self, api_key, df, data_dictionary):
         self.api_key = api_key
         self.df = df
+        self.data_dictionary = data_dictionary
 
-        # Initialize agents
-        self.orchestrator = OrchestratorAgent(api_key)
-        self.python_coder = PythonCodingAgent(api_key)
-        self.python_reviewer = PythonReviewAgent(api_key)
-        self.plotter = PlottingAgent(api_key)
-        self.summarizer = SummarizingAgent(api_key)
+        # Initialize all agents
+        self.context_validator = ContextValidator(api_key, data_dictionary)
+        self.knowledge_agent = GeneralKnowledgeAgent(api_key)
+        self.orchestrator = EnhancedOrchestratorAgent(api_key)
+        self.coder = EnhancedPythonCodingAgent(api_key)
+        self.reviewer = EnhancedPythonReviewAgent(api_key)
+        self.plotter = EnhancedPlottingAgent(api_key)
+        self.summarizer = EnhancedSummarizingAgent(api_key)
 
     def execute(self, user_question):
-        """Execute the agentic workflow"""
-        results = {
-            "question": user_question,
-            "plan": None,
-            "code": None,
-            "result_df": None,
-            "visualization": None,
-            "summary": None,
-            "errors": []
-        }
+        """Main execution with context validation"""
+        start_time = datetime.now()
 
         try:
-            # Step 1: Orchestrator plans execution
-            data_summary = f"""Dataset: {len(self.df)} records
-Columns: {', '.join(self.df.columns[:10].tolist())}...
-Date Range: {self.df['month'].min()} to {self.df['month'].max()}"""
+            # Step 1: Validate context
+            validation = self.context_validator.validate_context(user_question)
 
-            plan = self.orchestrator.plan_execution(user_question, data_summary)
-            results["plan"] = plan
+            result = {
+                "question": user_question,
+                "context_validation": validation,
+                "timestamp": start_time.isoformat()
+            }
 
-            # Step 2: Python Coding Agent processes data
-            if plan.get("needs_data_processing", True):
-                code = self.python_coder.generate_code(user_question, DATA_DICTIONARY["columns"])
-                results["code"] = code
+            # Step 2: Route based on context
+            if validation["classification"] == "out_of_context":
+                # Answer using general knowledge
+                answer = self.knowledge_agent.answer_general_question(
+                    user_question,
+                    data_context=self.data_dictionary['dataset_info']
+                )
+                result["answer_type"] = "general_knowledge"
+                result["summary"] = answer
+                result["result_df"] = None
 
-                # Try to execute code
-                try:
-                    local_vars = {"df": self.df, "pd": pd, "np": np}
-                    exec(code, {}, local_vars)
-                    result_df = local_vars.get("result_df", self.df)
-                    results["result_df"] = result_df
-                except Exception as e:
-                    # Step 3: Python Review Agent fixes errors
-                    error_msg = str(e)
-                    results["errors"].append(f"Initial code error: {error_msg}")
+            elif validation["classification"] == "hybrid":
+                # Combine data analysis with knowledge
+                data_result = self._process_data_question(user_question)
+                knowledge_answer = self.knowledge_agent.answer_general_question(
+                    user_question,
+                    data_context=self.data_dictionary['dataset_info']
+                )
+                result.update(data_result)
+                result["additional_context"] = knowledge_answer
+                result["answer_type"] = "hybrid"
 
-                    fixed_code = self.python_reviewer.review_and_fix(code, error_msg)
-                    results["code"] = fixed_code
-
-                    try:
-                        local_vars = {"df": self.df, "pd": pd, "np": np}
-                        exec(fixed_code, {}, local_vars)
-                        result_df = local_vars.get("result_df", self.df)
-                        results["result_df"] = result_df
-                    except Exception as e2:
-                        results["errors"].append(f"Fixed code error: {str(e2)}")
-                        result_df = self.df.head(10)  # Fallback
-                        results["result_df"] = result_df
             else:
-                result_df = self.df
-                results["result_df"] = result_df
+                # Process as data question
+                data_result = self._process_data_question(user_question)
+                result.update(data_result)
+                result["answer_type"] = "data_analysis"
 
-            # Step 4: Plotting Agent creates visualization
-            if plan.get("needs_visualization", False) and result_df is not None:
-                try:
-                    plot_code = self.plotter.generate_plot_code(
-                        result_df.head().to_string(), 
-                        user_question
-                    )
+            # Add execution time
+            result["execution_time"] = (datetime.now() - start_time).total_seconds()
 
-                    local_vars = {
-                        "result_df": result_df, 
-                        "px": px, 
-                        "go": go,
-                        "pd": pd
-                    }
-                    exec(plot_code, {}, local_vars)
-                    fig = local_vars.get("fig")
-                    results["visualization"] = fig
-                except Exception as e:
-                    results["errors"].append(f"Plotting error: {str(e)}")
-
-            # Step 5: Summarizing Agent provides insights
-            if plan.get("needs_summary", True) and result_df is not None:
-                data_str = result_df.head(20).to_string()
-                summary = self.summarizer.summarize(user_question, data_str)
-                results["summary"] = summary
+            return result
 
         except Exception as e:
-            results["errors"].append(f"Workflow error: {str(e)}")
-            results["errors"].append(traceback.format_exc())
+            return {
+                "question": user_question,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "result_df": self.df.head(10)
+            }
 
-        return results
+    def _process_data_question(self, user_question):
+        """Process data-related questions"""
+
+        result = {}
+
+        # Orchestration
+        plan = self.orchestrator.plan(user_question, self.df)
+        result["plan"] = plan
+
+        # Coding & Execution
+        if plan.get("needs_data", True):
+            code = self.coder.generate_code(user_question, self.df)
+            result["code"] = code
+
+            exec_result = self._safe_execute(code)
+            result.update(exec_result)
+
+        # Visualization
+        if plan.get("needs_viz", False) and result.get("result_df") is not None:
+            viz_code = self.plotter.generate_visualization(user_question, result["result_df"])
+            result["viz_code"] = viz_code
+
+            viz_result = self._safe_plot(viz_code, result["result_df"])
+            result.update(viz_result)
+
+        # Summary
+        if plan.get("needs_summary", True) and result.get("result_df") is not None:
+            summary = self.summarizer.generate_summary(user_question, result["result_df"])
+            result["summary"] = summary
+
+        return result
+
+    def _safe_execute(self, code, max_retries=2):
+        """Execute code with retry logic"""
+
+        for attempt in range(max_retries + 1):
+            try:
+                local_vars = {"df": self.df.copy(), "pd": pd, "np": np}
+                exec(code, {}, local_vars)
+                result_df = local_vars.get("result_df")
+
+                if result_df is None:
+                    raise ValueError("No result_df variable created")
+
+                # Handle nulls
+                if isinstance(result_df, pd.DataFrame):
+                    result_df = result_df.dropna(how='all')
+                    for col in result_df.columns:
+                        if result_df[col].dtype in ['float64', 'int64']:
+                            result_df[col] = result_df[col].fillna(0)
+
+                return {"result_df": result_df, "execution_status": "success", "attempts": attempt + 1}
+
+            except Exception as e:
+                if attempt < max_retries:
+                    # Try to fix the code
+                    code = self.reviewer.fix_code(code, str(e), self.df.columns.tolist())
+                else:
+                    return {"result_df": self.df.head(10), "error": str(e), "execution_status": "error"}
+
+        return {"result_df": self.df.head(10), "error": "Max retries exceeded"}
+
+    def _safe_plot(self, viz_code, result_df):
+        """Create visualization safely"""
+        try:
+            local_vars = {"result_df": result_df.copy(), "px": px, "go": go, "pd": pd}
+            exec(viz_code, {}, local_vars)
+            fig = local_vars.get("fig")
+            return {"chart": fig}
+        except Exception as e:
+            return {"chart": None, "viz_error": str(e)}
+
 
 # ============================================================================
 # DATA GENERATION SECTION
@@ -791,7 +1009,7 @@ def generate_dataset():
 
 # Page configuration
 st.set_page_config(
-    page_title="ServiceNow Strategic Planning & Analytics Dashboard",
+    page_title="Strategic Planning & Analytics Dashboard",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -799,63 +1017,339 @@ st.set_page_config(
 
 # Custom CSS
 st.markdown("""
-    <style>
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+        <style>
+    /* Import Google Fonts */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    /* ServiceNow Brand Colors */
+    :root {
+        --snow-dark-green: #293E40;
+        --snow-light-green: #81B5A1;
+        --snow-teal: #1F8476;
+        --snow-dark-gray: #2C3E50;
+        --snow-light-gray: #F4F6F8;
+        --snow-success: #28B463;
+        --snow-warning: #F39C12;
+        --snow-error: #E74C3C;
     }
-    .stMetric {
-        background-color: #ffffff;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 1px 1px 3px rgba(0,0,0,0.1);
+
+    /* Global Styles */
+    * {
+        font-family: 'Inter', sans-serif;
+    }
+
+    /* Main container with ServiceNow gradient */
+    .main {
+        background: linear-gradient(135deg, #F4F6F8 0%, #E8EEF2 100%);
+    }
+
+    /* Headers with ServiceNow colors */
+    h1 {
+        color: var(--snow-dark-green);
+        font-weight: 700;
         text-align: center;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
     }
+
+    h2 {
+        color: var(--snow-dark-green);
+        font-weight: 600;
+    }
+
+    h3 {
+        color: var(--snow-teal);
+        font-weight: 500;
+    }
+
+    /* Glassmorphism Metric Cards with ServiceNow styling */
+    .stMetric {
+        background: rgba(255, 255, 255, 0.98);
+        backdrop-filter: blur(10px);
+        padding: 1.5rem;
+        border-radius: 12px;
+        box-shadow: 0 4px 20px 0 rgba(41, 62, 64, 0.1);
+        border: 1px solid rgba(129, 181, 161, 0.2);
+        text-align: center;
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .stMetric:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 32px 0 rgba(41, 62, 64, 0.15);
+        border-color: var(--snow-light-green);
+    }
+
     .stMetric label {
         text-align: center;
         justify-content: center;
         display: flex;
     }
+
     .stMetric > div {
         text-align: center;
         justify-content: center;
     }
-    [data-testid="stMetricValue"] {
-        text-align: center;
-        justify-content: center;
-        display: flex;
-    }
+
     [data-testid="stMetricLabel"] {
         text-align: center;
         justify-content: center;
         display: flex;
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
     }
+
+    [data-testid="stMetricValue"] {
+        text-align: center;
+        justify-content: center;
+        display: flex;
+        font-size: 2rem;
+        font-weight: 700;
+        background: linear-gradient(135deg, var(--snow-teal) 0%, var(--snow-dark-green) 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+
     [data-testid="stMetricDelta"] {
         text-align: center;
         justify-content: center;
         display: flex;
+        font-weight: 600;
     }
+
+    /* Section headers with ServiceNow brand gradient */
     .section-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, var(--snow-teal) 0%, var(--snow-dark-green) 100%);
         color: white;
-        padding: 15px;
-        border-radius: 10px;
-        margin: 20px 0 10px 0;
+        padding: 0.75rem 1.5rem;
+        border-radius: 12px;
+        margin: 1.5rem 0 1rem 0;
+        box-shadow: 0 4px 20px 0 rgba(31, 132, 118, 0.2);
     }
+
+    .section-header h3 {
+        color: white;
+        margin: 0;
+        font-weight: 600;
+        text-align: center;
+    }
+
+    /* Sidebar with ServiceNow branding */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, 
+            var(--snow-dark-green) 0%, 
+            var(--snow-teal) 50%, 
+            var(--snow-light-green) 100%);
+        padding: 2rem 1rem;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+        color: white;
+    }
+
+    [data-testid="stSidebar"] label {
+        color: white !important;
+        font-weight: 500;
+    }
+
+    /* Tabs with ServiceNow styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background: rgba(255, 255, 255, 0.8);
+        border-radius: 12px;
+        padding: 0.5rem;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        color: var(--snow-dark-gray);
+    }
+
+    .stTabs [data-baseweb="tab"]:hover {
+        background: rgba(129, 181, 161, 0.15);
+        color: var(--snow-teal);
+    }
+
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, var(--snow-teal) 0%, var(--snow-dark-green) 100%) !important;
+        color: white !important;
+    }
+
+    /* Buttons with ServiceNow branding */
+    .stButton button {
+        background: linear-gradient(135deg, var(--snow-teal) 0%, var(--snow-dark-green) 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.75rem 2rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px 0 rgba(31, 132, 118, 0.25);
+    }
+
+    .stButton button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px 0 rgba(31, 132, 118, 0.35);
+        background: linear-gradient(135deg, var(--snow-dark-green) 0%, var(--snow-teal) 100%);
+    }
+
+    /* Dataframe styling */
+    .stDataFrame {
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 4px 20px 0 rgba(41, 62, 64, 0.1);
+        background: white;
+    }
+
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: rgba(129, 181, 161, 0.1);
+        border-radius: 8px;
+        font-weight: 600;
+        color: var(--snow-dark-green);
+        border-left: 3px solid var(--snow-light-green);
+    }
+
+    /* Chat message styling */
     .chat-message {
-        padding: 10px;
-        border-radius: 10px;
-        margin: 10px 0;
+        padding: 1rem;
+        border-radius: 12px;
+        margin: 1rem 0;
+        box-shadow: 0 2px 10px 0 rgba(41, 62, 64, 0.08);
     }
+
     .user-message {
-        background-color: #e3f2fd;
+        background: linear-gradient(135deg, rgba(129, 181, 161, 0.15) 0%, rgba(129, 181, 161, 0.05) 100%);
         text-align: right;
+        border-left: 4px solid var(--snow-light-green);
     }
+
     .bot-message {
-        background-color: #f5f5f5;
+        background: linear-gradient(135deg, rgba(31, 132, 118, 0.1) 0%, rgba(31, 132, 118, 0.05) 100%);
         text-align: left;
+        border-left: 4px solid var(--snow-teal);
+    }
+
+    /* Charts with ServiceNow styling */
+    .js-plotly-plot {
+        border-radius: 12px;
+        box-shadow: 0 4px 20px 0 rgba(41, 62, 64, 0.08);
+        background: white;
+        padding: 1rem;
+        transition: box-shadow 0.3s ease;
+        border: 1px solid rgba(129, 181, 161, 0.15);
+    }
+
+    .js-plotly-plot:hover {
+        box-shadow: 0 8px 32px 0 rgba(31, 132, 118, 0.15);
+        border-color: var(--snow-light-green);
+    }
+
+    /* Input field styling */
+    .stTextInput input, .stTextArea textarea, .stSelectbox select {
+        border-radius: 8px;
+        border: 2px solid rgba(129, 181, 161, 0.3);
+        transition: all 0.3s ease;
+    }
+
+    .stTextInput input:focus, .stTextArea textarea:focus, .stSelectbox select:focus {
+        border-color: var(--snow-teal);
+        box-shadow: 0 0 0 3px rgba(31, 132, 118, 0.1);
+    }
+
+    /* Scrollbar with ServiceNow colors */
+    ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: rgba(129, 181, 161, 0.1);
+        border-radius: 10px;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: linear-gradient(135deg, var(--snow-teal) 0%, var(--snow-light-green) 100%);
+        border-radius: 10px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(135deg, var(--snow-dark-green) 0%, var(--snow-teal) 100%);
+    }
+
+    /* Status badges with ServiceNow colors */
+    .badge-excellent {
+        background: linear-gradient(135deg, var(--snow-success) 0%, #1e8449 100%);
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 50px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        box-shadow: 0 2px 8px rgba(40, 180, 99, 0.3);
+    }
+
+    .badge-good {
+        background: linear-gradient(135deg, var(--snow-light-green) 0%, var(--snow-teal) 100%);
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 50px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        box-shadow: 0 2px 8px rgba(129, 181, 161, 0.3);
+    }
+
+    .badge-warning {
+        background: linear-gradient(135deg, var(--snow-warning) 0%, #d68910 100%);
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 50px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        box-shadow: 0 2px 8px rgba(243, 156, 18, 0.3);
+    }
+
+    .badge-critical {
+        background: linear-gradient(135deg, var(--snow-error) 0%, #c0392b 100%);
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 50px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        box-shadow: 0 2px 8px rgba(231, 76, 60, 0.3);
+    }
+
+    /* Responsive design */
+    @media (max-width: 768px) {
+        .stMetric {
+            padding: 1rem;
+        }
+
+        [data-testid="stMetricValue"] {
+            font-size: 1.5rem;
+        }
+
+        .section-header {
+            padding: 0.5rem 1rem;
+        }
+    }
+
+    /* Print styles */
+    @media print {
+        .stButton, [data-testid="stSidebar"], .stTabs {
+            display: none;
+        }
+
+        .main {
+            background: white !important;
+        }
     }
     </style>
 """, unsafe_allow_html=True)
@@ -886,8 +1380,7 @@ def load_data():
 df = load_data()
 
 # Title
-st.title("📊 ServiceNow Strategic Planning & Analytics Dashboard")
-st.markdown("### Revenue, Pipeline & Partner Analytics with Agentic AI Assistant")
+st.title("📊 Strategic Planning & Analytics Dashboard")
 st.markdown("---")
 
 # Sidebar filters
@@ -895,15 +1388,6 @@ st.sidebar.header("🔍 Filters")
 
 # Gemini API Key input
 api_key = st.sidebar.text_input("🔑 Gemini API Key", value="AIzaSyBqxxgDhHmvjdAp-KtJk50_2OKauB47790", type="password")
-
-# Data regeneration button
-if st.sidebar.button("🔄 Regenerate Dataset"):
-    if os.path.exists('llm_dashboard.csv'):
-        os.remove('llm_dashboard.csv')
-    st.cache_data.clear()
-    st.rerun()
-
-st.sidebar.markdown("---")
 
 min_date = df['month'].min()
 max_date = df['month'].max()
@@ -945,7 +1429,7 @@ prev_month = latest_month - pd.DateOffset(months=1)
 prev_data = filtered_df[filtered_df['month'] == prev_month]
 
 # Executive Summary
-st.header(f"📈 Executive Summary - {latest_month.strftime('%B %Y')}")
+st.header("📈 Executive Summary ")
 
 # Calculate current metrics
 current_mrr = latest_data['mrr'].sum()
@@ -1288,18 +1772,6 @@ with tab3:
 with tab4:
     st.markdown('<div class="section-header"><h3>🤖 Agentic AI-Powered Data Assistant</h3></div>', unsafe_allow_html=True)
 
-    st.markdown("""
-    **Powered by Multi-Agent AI System**
-
-    This intelligent assistant uses multiple specialized agents working together:
-    - 🎯 **Orchestrator Agent**: Plans the execution strategy
-    - 💻 **Python Coding Agent**: Writes data processing code
-    - 🔍 **Python Review Agent**: Reviews and fixes code errors
-    - 📊 **Plotting Agent**: Creates visualizations
-    - 📝 **Summarizing Agent**: Provides executive insights
-
-    **Ask complex questions and get comprehensive answers with visualizations!**
-    """)
 
     # Initialize agentic chatbot
     if 'agentic_chatbot' not in st.session_state and api_key:
@@ -1407,9 +1879,7 @@ with tab4:
         - Deal size distribution
         """)
 
-    # Data Dictionary Reference
-    with st.expander("📖 Data Dictionary & Metadata"):
-        st.json(DATA_DICTIONARY)
+
 
 # Footer
 st.markdown("---")
