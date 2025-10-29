@@ -194,296 +194,134 @@ DATA_DICTIONARY = {
 }
 
 # ============================================================================
-# ENHANCED AGENTIC AI SYSTEM WITH OUT-OF-CONTEXT HANDLING (2025)
+# AGENTIC AI SYSTEM
 # ============================================================================
 
-import time
-
-class ContextValidator:
-    """Validates if questions are within the dashboard data context"""
-
-    def __init__(self, api_key, data_dictionary):
-        self.api_key = api_key
-        self.client = genai.Client(api_key=api_key) if api_key else None
-        self.data_dictionary = data_dictionary
-
-    def validate_context(self, user_question):
-        """Determine if question is within data context or general knowledge"""
-
-        if not self.client:
-            return {"in_context": True, "confidence": 0.5, "reasoning": "No API key"}
-
-        # Get available metrics from data dictionary
-        available_metrics = list(self.data_dictionary.get("columns", {}).keys())
-
-        prompt = f"""You are a context validator for a ServiceNow analytics dashboard.
-
-AVAILABLE DATA CONTEXT:
-Dataset: {self.data_dictionary['dataset_info']['name']}
-Available Metrics: {', '.join(available_metrics[:30])}
-Time Period: {self.data_dictionary['dataset_info']['date_range']}
-Granularity: {self.data_dictionary['dataset_info']['granularity']}
-
-USER QUESTION: "{user_question}"
-
-TASK: Determine if this question can be answered using the available dashboard data.
-
-CLASSIFICATION RULES:
-1. IN-CONTEXT (answer with data):
-   - Questions about metrics in the available list
-   - Questions about trends, comparisons, aggregations
-   - Questions about specific clients, industries, time periods
-   - Examples: "What's the total MRR?", "Show top 10 clients", "MRR trend"
-
-2. OUT-OF-CONTEXT (answer with general knowledge):
-   - General questions about business concepts
-   - Questions about methodologies or best practices
-   - "What is..." or "How to..." questions not requiring data
-   - Examples: "What is MRR?", "How to improve churn?", "What is ServiceNow?"
-
-3. HYBRID (needs both data and knowledge):
-   - Requests for insights with explanations
-   - Examples: "Why is churn high and how to fix it?"
-
-OUTPUT FORMAT (JSON only):
-{{
-    "classification": "in_context" or "out_of_context" or "hybrid",
-    "confidence": 0.0 to 1.0,
-    "reasoning": "Brief explanation",
-    "suggested_approach": "data_analysis" or "knowledge_response" or "combined"
-}}
-
-RESPOND WITH JSON ONLY:"""
-
-        try:
-            response = self.client.models.generate_content(
-                model="gemini-2.0-flash-exp",
-                contents=prompt,
-                config={"temperature": 0.2}
-            )
-
-            # Parse response
-            response_text = response.text
-            if "```json" in response_text:
-                json_str = response_text.split("```json")[1].split("```")[0].strip()
-            elif "{" in response_text:
-                json_str = response_text[response_text.find("{"):response_text.rfind("}")+1]
-            else:
-                json_str = response_text
-
-            result = json.loads(json_str)
-            result.setdefault("classification", "in_context")
-            result.setdefault("confidence", 0.7)
-
-            return result
-
-        except Exception as e:
-            return {
-                "classification": "in_context",
-                "confidence": 0.5,
-                "reasoning": f"Error in validation: {str(e)}",
-                "suggested_approach": "data_analysis"
-            }
-
-
-class GeneralKnowledgeAgent:
-    """Handles out-of-context questions using general knowledge"""
-
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.client = genai.Client(api_key=api_key) if api_key else None
-
-    def answer_general_question(self, user_question, data_context=None):
-        """Answer general knowledge questions"""
-
-        if not self.client:
-            return "Unable to answer - API key required"
-
-        context_info = ""
-        if data_context:
-            context_info = f"""
-
-DASHBOARD CONTEXT (for reference):
-The user is viewing a ServiceNow Strategic Planning & Analytics Dashboard with:
-- Revenue metrics (MRR, ARR, Pipeline)
-- Customer health metrics (NPS, Health Score, Churn)
-- Renewal metrics (Days to renewal, Risk scores)
-- Partner metrics (Revenue, Engagement)
-
-You can reference this context if relevant to the question."""
-
-        prompt = f"""You are a senior business consultant and ServiceNow expert.
-
-USER QUESTION: "{user_question}"
-{context_info}
-
-INSTRUCTIONS:
-1. Provide a clear, professional answer
-2. Use business language (not technical jargon)
-3. Structure your response with headers if needed
-4. Include practical examples when helpful
-5. If the question relates to metrics, explain what they are and why they matter
-6. Keep it concise but comprehensive (200-400 words)
-
-FORMAT YOUR RESPONSE:
-- Use ## for main headers
-- Use bullet points for lists
-- Bold key terms with **term**
-- Provide actionable insights
-
-YOUR RESPONSE:"""
-
-        try:
-            response = self.client.models.generate_content(
-                model="gemini-2.0-flash-exp",
-                contents=prompt,
-                config={"temperature": 0.4, "max_output_tokens": 1000}
-            )
-            return response.text
-        except Exception as e:
-            return f"Error generating response: {str(e)}"
-
-
-class EnhancedBaseAgent:
-    """Enhanced base agent with retry logic and performance tracking"""
-
+class BaseAgent:
+    """Base class for all agents"""
     def __init__(self, api_key, role, instructions):
         self.api_key = api_key
         self.role = role
         self.instructions = instructions
         self.client = genai.Client(api_key=api_key) if api_key else None
-        self.metrics = {"total_calls": 0, "successful_calls": 0, "errors": []}
 
-    def query(self, prompt, temperature=0.3, max_retries=2):
-        """Query with retry logic and exponential backoff"""
-
+    def query(self, prompt, context=""):
+        """Query the Gemini API"""
         if not self.client:
             return "Error: API key not provided"
 
-        for attempt in range(max_retries + 1):
-            try:
-                self.metrics["total_calls"] += 1
+        try:
+            full_prompt = f"""Role: {self.role}
 
-                full_prompt = f"""ROLE: {self.role}
+Instructions: {self.instructions}
 
-{self.instructions}
+Context: {context}
 
-TASK:
-{prompt}
+Task: {prompt}
+"""
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=full_prompt,
+            )
+            return response.text
+        except Exception as e:
+            return f"Error: {str(e)}"
 
-YOUR RESPONSE:"""
-
-                response = self.client.models.generate_content(
-                    model="gemini-2.0-flash-exp",
-                    contents=full_prompt,
-                    config={
-                        "temperature": temperature,
-                        "top_p": 0.95,
-                        "top_k": 40,
-                        "max_output_tokens": 2048
-                    }
-                )
-
-                self.metrics["successful_calls"] += 1
-                return response.text
-
-            except Exception as e:
-                if attempt < max_retries:
-                    time.sleep(2 ** attempt)
-                else:
-                    self.metrics["errors"].append(str(e))
-                    return f"Error: {str(e)}"
-
-        return "Error: Max retries exceeded"
-
-
-class EnhancedOrchestratorAgent(EnhancedBaseAgent):
-    """Orchestrator with context awareness"""
-
+class OrchestratorAgent(BaseAgent):
+    """Orchestrator agent that decides which agents to call"""
     def __init__(self, api_key):
-        role = "Strategic Orchestrator"
-        instructions = """Analyze questions and plan optimal execution strategy.
+        role = "Orchestrator Agent"
+        instructions = """You are an orchestrator that analyzes user questions and decides which agents to call.
 
-DECISION FRAMEWORK:
-- Data queries → Python coding
-- Visualizations → Plotting  
-- Insights → Summarizing
-- Complex analysis → Multiple agents"""
+Available agents:
+1. python_coding_agent - For data processing, aggregations, filtering
+2. plotting_agent - For creating visualizations
+3. summarizing_agent - For providing executive summaries and insights
+
+Your task:
+- Analyze the user question
+- Decide which agents to call and in what order
+- Return a JSON with the plan
+
+Response format:
+{
+    "reasoning": "Why you chose this approach",
+    "agents": ["agent1", "agent2", "agent3"],
+    "needs_data_processing": true/false,
+    "needs_visualization": true/false,
+    "needs_summary": true/false
+}"""
         super().__init__(api_key, role, instructions)
 
-    def plan(self, user_question, df):
-        """Create execution plan"""
+    def plan_execution(self, user_question, data_summary):
+        """Plan which agents to execute"""
+        prompt = f"""User Question: {user_question}
 
-        prompt = f"""Analyze: "{user_question}"
+Data Summary: {data_summary}
 
-Available data: {len(df)} rows, Columns: {', '.join(df.columns[:15].tolist())}
+Decide which agents to call to answer this question comprehensively."""
 
-Determine needs:
-- Data processing? (aggregations, filtering)
-- Visualization? (charts, graphs)
-- Summary? (insights, recommendations)
+        response = self.query(prompt)
 
-OUTPUT JSON:
-{{"needs_data": true/false, "needs_viz": true/false, "needs_summary": true/false, "complexity": "low/medium/high"}}"""
-
-        response = self.query(prompt, temperature=0.2)
-
+        # Parse JSON response
         try:
+            # Extract JSON from response
             if "```json" in response:
                 json_str = response.split("```json")[1].split("```")[0].strip()
-            elif "{" in response:
+            elif "{" in response and "}" in response:
                 json_str = response[response.find("{"):response.rfind("}")+1]
             else:
                 json_str = response
 
             plan = json.loads(json_str)
-            plan.setdefault("needs_data", True)
-            plan.setdefault("needs_viz", False)
-            plan.setdefault("needs_summary", True)
-
             return plan
         except:
-            return {"needs_data": True, "needs_viz": False, "needs_summary": True}
+            # Default plan if parsing fails
+            return {
+                "reasoning": "Using default plan",
+                "agents": ["python_coding_agent", "summarizing_agent"],
+                "needs_data_processing": True,
+                "needs_visualization": False,
+                "needs_summary": True
+            }
 
-
-class EnhancedPythonCodingAgent(EnhancedBaseAgent):
-    """Advanced coding with best practices"""
-
+class PythonCodingAgent(BaseAgent):
+    """Agent that writes Python code to process data"""
     def __init__(self, api_key):
-        role = "Expert Python Data Analyst"
-        instructions = """Write clean pandas code following best practices.
+        role = "Python Coding Agent"
+        instructions = """You are an expert Python programmer specializing in data analysis with pandas.
 
-RULES:
-✓ Input: df, Output: result_df
-✓ Handle nulls with .dropna() or .fillna()
-✓ Reset index after groupby
-✓ Use meaningful names
-✗ No print statements
-✗ No comments
+Your task:
+- Write clean, efficient Python code to process the dataframe
+- Use pandas operations (groupby, agg, filter, etc.)
+- Return ONLY executable Python code
+- The input dataframe variable is named 'df'
+- Store result in a variable named 'result_df'
+- Do not include any explanations, only code
 
-PATTERNS:
-# Aggregation
-result_df = df[df['val']>0].groupby('cat')['val'].sum().reset_index()
-
-# Time series
-result_df = df.groupby('month')['metric'].sum().reset_index().sort_values('month')
-
-# Top N
-result_df = df.nlargest(10, 'value')[['name', 'value']]"""
+Example:
+result_df = df.groupby('month')['mrr'].sum().reset_index()"""
         super().__init__(api_key, role, instructions)
 
-    def generate_code(self, task, df):
-        """Generate pandas code"""
+    def generate_code(self, user_question, data_dict):
+        """Generate Python code for data processing"""
+        context = f"""Data Dictionary:
+{json.dumps(data_dict, indent=2)}
 
-        prompt = f"""Task: {task}
+Available columns and their descriptions are provided above."""
 
-Columns: {', '.join(df.columns.tolist())}
-Shape: {df.shape}
+        prompt = f"""Generate Python pandas code to answer: {user_question}
 
-Write pandas code (no markdown, no explanations):"""
+Requirements:
+- Input dataframe: df
+- Output dataframe: result_df
+- Use only columns available in the data dictionary
+- Code should be clean and executable
+- Return ONLY the code, no explanations"""
 
-        code = self.query(prompt, temperature=0.1)
+        code = self.query(prompt, context)
 
+        # Clean code
         if "```python" in code:
             code = code.split("```python")[1].split("```")[0].strip()
         elif "```" in code:
@@ -491,86 +329,76 @@ Write pandas code (no markdown, no explanations):"""
 
         return code
 
-
-class EnhancedPythonReviewAgent(EnhancedBaseAgent):
-    """Code reviewer with error patterns"""
-
+class PythonReviewAgent(BaseAgent):
+    """Agent that reviews and fixes Python code"""
     def __init__(self, api_key):
-        role = "Senior Code Reviewer"
-        instructions = """Fix pandas code errors.
+        role = "Python Review Agent"
+        instructions = """You are a code reviewer specializing in pandas and data processing.
 
-ERROR PATTERNS:
-1. NameError → Check column names
-2. KeyError → Add .reset_index()
-3. ValueError → Handle empty data
-4. TypeError → Convert data types
-
-OUTPUT: Fixed code only."""
+Your task:
+- Review the provided code for errors
+- Fix syntax errors, logic issues, or bugs
+- Ensure code follows pandas best practices
+- Return the corrected code ONLY
+- Do not include explanations"""
         super().__init__(api_key, role, instructions)
 
-    def fix_code(self, code, error, columns):
-        """Fix broken code"""
-
-        prompt = f"""Fix this code:
+    def review_and_fix(self, code, error_message=""):
+        """Review and fix Python code"""
+        prompt = f"""Review and fix this code:
 
 {code}
 
-Error: {error}
-Columns: {', '.join(columns)}
+Error (if any): {error_message}
 
-Return fixed code only:"""
+Return the corrected code only."""
 
-        fixed = self.query(prompt, temperature=0.1)
+        fixed_code = self.query(prompt)
 
-        if "```python" in fixed:
-            fixed = fixed.split("```python")[1].split("```")[0].strip()
-        elif "```" in fixed:
-            fixed = fixed.split("```")[1].split("```")[0].strip()
+        # Clean code
+        if "```python" in fixed_code:
+            fixed_code = fixed_code.split("```python")[1].split("```")[0].strip()
+        elif "```" in fixed_code:
+            fixed_code = fixed_code.split("```")[1].split("```")[0].strip()
 
-        return fixed
+        return fixed_code
 
-
-class EnhancedPlottingAgent(EnhancedBaseAgent):
-    """Plotting with null safety"""
-
+class PlottingAgent(BaseAgent):
+    """Agent that creates visualizations"""
     def __init__(self, api_key):
-        role = "Data Visualization Expert"
-        instructions = """Create Plotly visualizations.
+        role = "Plotting Agent"
+        instructions = """You are a data visualization expert using Plotly.
 
-CHART TYPES:
-- Time series → LINE (px.line)
-- Categories → BAR (px.bar)
-- Part-whole → PIE (px.pie)
-- Distribution → HISTOGRAM
+Your task:
+- Analyze the processed dataframe
+- Recommend the best chart type (line, bar, pie, scatter, etc.)
+- Create Plotly code to generate the visualization
+- Return code that creates a 'fig' variable
 
-CRITICAL:
-1. Remove nulls: result_df = result_df.dropna()
-2. Check empty: if len(result_df) == 0
-3. Variable: fig
-4. Height: 400-600px
-
-TEMPLATE:
-result_df = result_df.dropna()
-if len(result_df) > 0:
-    fig = px.line(result_df, x='x', y='y', title='Title')
-else:
-    fig = go.Figure()
-fig.update_layout(height=500)"""
+Available: plotly.express as px, plotly.graph_objects as go
+Input dataframe: result_df"""
         super().__init__(api_key, role, instructions)
 
-    def generate_visualization(self, task, result_df):
-        """Generate viz code"""
+    def generate_plot_code(self, df_head, user_question):
+        """Generate Plotly code for visualization"""
+        context = f"""Dataframe preview (first 5 rows):
+{df_head}
 
-        df_info = f"Columns: {result_df.columns.tolist()}, Shape: {result_df.shape}"
+Dataframe info:
+- Columns: {', '.join(df_head.columns.tolist()) if hasattr(df_head, 'columns') else 'N/A'}"""
 
-        prompt = f"""Create chart for: {task}
+        prompt = f"""Create a Plotly visualization to answer: {user_question}
 
-Data: {df_info}
+Requirements:
+- Input dataframe: result_df
+- Create a figure named: fig
+- Use appropriate chart type
+- Add title and labels
+- Return ONLY the code"""
 
-Return code only (with null handling):"""
+        code = self.query(prompt, context)
 
-        code = self.query(prompt, temperature=0.2)
-
+        # Clean code
         if "```python" in code:
             code = code.split("```python")[1].split("```")[0].strip()
         elif "```" in code:
@@ -578,185 +406,140 @@ Return code only (with null handling):"""
 
         return code
 
-
-class EnhancedSummarizingAgent(EnhancedBaseAgent):
-    """Executive insights generator"""
-
+class SummarizingAgent(BaseAgent):
+    """Agent that provides executive summaries"""
     def __init__(self, api_key):
-        role = "Senior Business Consultant"
-        instructions = """Provide executive-level insights.
+        role = "Summarizing Agent - Executive Consultant"
+        instructions = """You are a senior business consultant providing insights to executives.
 
-STRUCTURE:
-## Executive Summary (2-3 sentences)
-## Key Insights (3-5 bullets with numbers)
-## Recommendations (2-3 actionable items)
+Your task:
+- Analyze the data results
+- Provide clear, actionable insights
+- Use business language (avoid technical jargon)
+- Highlight key findings and recommendations
+- Structure as: Key Insights, Observations, Recommendations"""
+        super().__init__(api_key, role, instructions)  # FIXED: Removed 'self,' from here
 
-STYLE:
-✓ Business language
-✓ Specific numbers
-✓ Actionable advice
-✗ No technical jargon"""
-        super().__init__(api_key, role, instructions)
+    def summarize(self, user_question, data_result):
+        """Generate executive summary"""
+        context = f"""Data Result:
+{data_result}"""
 
-    def generate_summary(self, task, result_df):
-        """Generate insights"""
+        prompt = f"""Provide an executive summary for: {user_question}
 
-        data_summary = result_df.head(15).to_string() if isinstance(result_df, pd.DataFrame) else str(result_df)
+Format your response with:
+## Key Insights
+- Main finding 1
+- Main finding 2
 
-        prompt = f"""Question: {task}
+## Observations
+- Detailed observation 1
+- Detailed observation 2
 
-Data:
-{data_summary}
+## Recommendations
+- Action item 1
+- Action item 2"""
 
-Provide executive insights:"""
+        summary = self.query(prompt, context)
+        return summary
 
-        return self.query(prompt, temperature=0.4)
-
-
-class EnhancedAgenticChatbot:
-    """Enhanced chatbot with out-of-context handling"""
-
-    def __init__(self, api_key, df, data_dictionary):
+class AgenticChatbot:
+    """Main agentic chatbot coordinator"""
+    def __init__(self, api_key, df):
         self.api_key = api_key
         self.df = df
-        self.data_dictionary = data_dictionary
 
-        # Initialize all agents
-        self.context_validator = ContextValidator(api_key, data_dictionary)
-        self.knowledge_agent = GeneralKnowledgeAgent(api_key)
-        self.orchestrator = EnhancedOrchestratorAgent(api_key)
-        self.coder = EnhancedPythonCodingAgent(api_key)
-        self.reviewer = EnhancedPythonReviewAgent(api_key)
-        self.plotter = EnhancedPlottingAgent(api_key)
-        self.summarizer = EnhancedSummarizingAgent(api_key)
+        # Initialize agents
+        self.orchestrator = OrchestratorAgent(api_key)
+        self.python_coder = PythonCodingAgent(api_key)
+        self.python_reviewer = PythonReviewAgent(api_key)
+        self.plotter = PlottingAgent(api_key)
+        self.summarizer = SummarizingAgent(api_key)
 
     def execute(self, user_question):
-        """Main execution with context validation"""
-        start_time = datetime.now()
+        """Execute the agentic workflow"""
+        results = {
+            "question": user_question,
+            "plan": None,
+            "code": None,
+            "result_df": None,
+            "visualization": None,
+            "summary": None,
+            "errors": []
+        }
 
         try:
-            # Step 1: Validate context
-            validation = self.context_validator.validate_context(user_question)
+            # Step 1: Orchestrator plans execution
+            data_summary = f"""Dataset: {len(self.df)} records
+Columns: {', '.join(self.df.columns[:10].tolist())}...
+Date Range: {self.df['month'].min()} to {self.df['month'].max()}"""
 
-            result = {
-                "question": user_question,
-                "context_validation": validation,
-                "timestamp": start_time.isoformat()
-            }
+            plan = self.orchestrator.plan_execution(user_question, data_summary)
+            results["plan"] = plan
 
-            # Step 2: Route based on context
-            if validation["classification"] == "out_of_context":
-                # Answer using general knowledge
-                answer = self.knowledge_agent.answer_general_question(
-                    user_question,
-                    data_context=self.data_dictionary['dataset_info']
-                )
-                result["answer_type"] = "general_knowledge"
-                result["summary"] = answer
-                result["result_df"] = None
+            # Step 2: Python Coding Agent processes data
+            if plan.get("needs_data_processing", True):
+                code = self.python_coder.generate_code(user_question, DATA_DICTIONARY["columns"])
+                results["code"] = code
 
-            elif validation["classification"] == "hybrid":
-                # Combine data analysis with knowledge
-                data_result = self._process_data_question(user_question)
-                knowledge_answer = self.knowledge_agent.answer_general_question(
-                    user_question,
-                    data_context=self.data_dictionary['dataset_info']
-                )
-                result.update(data_result)
-                result["additional_context"] = knowledge_answer
-                result["answer_type"] = "hybrid"
+                # Try to execute code
+                try:
+                    local_vars = {"df": self.df, "pd": pd, "np": np}
+                    exec(code, {}, local_vars)
+                    result_df = local_vars.get("result_df", self.df)
+                    results["result_df"] = result_df
+                except Exception as e:
+                    # Step 3: Python Review Agent fixes errors
+                    error_msg = str(e)
+                    results["errors"].append(f"Initial code error: {error_msg}")
 
+                    fixed_code = self.python_reviewer.review_and_fix(code, error_msg)
+                    results["code"] = fixed_code
+
+                    try:
+                        local_vars = {"df": self.df, "pd": pd, "np": np}
+                        exec(fixed_code, {}, local_vars)
+                        result_df = local_vars.get("result_df", self.df)
+                        results["result_df"] = result_df
+                    except Exception as e2:
+                        results["errors"].append(f"Fixed code error: {str(e2)}")
+                        result_df = self.df.head(10)  # Fallback
+                        results["result_df"] = result_df
             else:
-                # Process as data question
-                data_result = self._process_data_question(user_question)
-                result.update(data_result)
-                result["answer_type"] = "data_analysis"
+                result_df = self.df
+                results["result_df"] = result_df
 
-            # Add execution time
-            result["execution_time"] = (datetime.now() - start_time).total_seconds()
+            # Step 4: Plotting Agent creates visualization
+            if plan.get("needs_visualization", False) and result_df is not None:
+                try:
+                    plot_code = self.plotter.generate_plot_code(
+                        result_df.head().to_string(), 
+                        user_question
+                    )
 
-            return result
+                    local_vars = {
+                        "result_df": result_df, 
+                        "px": px, 
+                        "go": go,
+                        "pd": pd
+                    }
+                    exec(plot_code, {}, local_vars)
+                    fig = local_vars.get("fig")
+                    results["visualization"] = fig
+                except Exception as e:
+                    results["errors"].append(f"Plotting error: {str(e)}")
+
+            # Step 5: Summarizing Agent provides insights
+            if plan.get("needs_summary", True) and result_df is not None:
+                data_str = result_df.head(20).to_string()
+                summary = self.summarizer.summarize(user_question, data_str)
+                results["summary"] = summary
 
         except Exception as e:
-            return {
-                "question": user_question,
-                "error": str(e),
-                "traceback": traceback.format_exc(),
-                "result_df": self.df.head(10)
-            }
+            results["errors"].append(f"Workflow error: {str(e)}")
+            results["errors"].append(traceback.format_exc())
 
-    def _process_data_question(self, user_question):
-        """Process data-related questions"""
-
-        result = {}
-
-        # Orchestration
-        plan = self.orchestrator.plan(user_question, self.df)
-        result["plan"] = plan
-
-        # Coding & Execution
-        if plan.get("needs_data", True):
-            code = self.coder.generate_code(user_question, self.df)
-            result["code"] = code
-
-            exec_result = self._safe_execute(code)
-            result.update(exec_result)
-
-        # Visualization
-        if plan.get("needs_viz", False) and result.get("result_df") is not None:
-            viz_code = self.plotter.generate_visualization(user_question, result["result_df"])
-            result["viz_code"] = viz_code
-
-            viz_result = self._safe_plot(viz_code, result["result_df"])
-            result.update(viz_result)
-
-        # Summary
-        if plan.get("needs_summary", True) and result.get("result_df") is not None:
-            summary = self.summarizer.generate_summary(user_question, result["result_df"])
-            result["summary"] = summary
-
-        return result
-
-    def _safe_execute(self, code, max_retries=2):
-        """Execute code with retry logic"""
-
-        for attempt in range(max_retries + 1):
-            try:
-                local_vars = {"df": self.df.copy(), "pd": pd, "np": np}
-                exec(code, {}, local_vars)
-                result_df = local_vars.get("result_df")
-
-                if result_df is None:
-                    raise ValueError("No result_df variable created")
-
-                # Handle nulls
-                if isinstance(result_df, pd.DataFrame):
-                    result_df = result_df.dropna(how='all')
-                    for col in result_df.columns:
-                        if result_df[col].dtype in ['float64', 'int64']:
-                            result_df[col] = result_df[col].fillna(0)
-
-                return {"result_df": result_df, "execution_status": "success", "attempts": attempt + 1}
-
-            except Exception as e:
-                if attempt < max_retries:
-                    # Try to fix the code
-                    code = self.reviewer.fix_code(code, str(e), self.df.columns.tolist())
-                else:
-                    return {"result_df": self.df.head(10), "error": str(e), "execution_status": "error"}
-
-        return {"result_df": self.df.head(10), "error": "Max retries exceeded"}
-
-    def _safe_plot(self, viz_code, result_df):
-        """Create visualization safely"""
-        try:
-            local_vars = {"result_df": result_df.copy(), "px": px, "go": go, "pd": pd}
-            exec(viz_code, {}, local_vars)
-            fig = local_vars.get("fig")
-            return {"chart": fig}
-        except Exception as e:
-            return {"chart": None, "viz_error": str(e)}
-
+        return results
 
 # ============================================================================
 # DATA GENERATION SECTION
@@ -1805,20 +1588,23 @@ with tab4:
 
         # Show result
         if interaction["results"].get("result_df") is not None:
-            st.markdown("### 📊 Data Result")
-            st.dataframe(interaction["results"]["result_df"].head(20), use_container_width=True)
+            pass
+            # st.markdown("### 📊 Data Result")
+            # st.dataframe(interaction["results"]["result_df"].head(20), use_container_width=True)
 
         # Show visualization
         if interaction["results"].get("visualization"):
+            pass
             st.markdown("### 📈 Visualization")
             st.plotly_chart(interaction["results"]["visualization"], use_container_width=True)
 
         # Show summary
         if interaction["results"].get("summary"):
+            pass
             st.markdown(f'<div class="chat-message bot-message">{interaction["results"]["summary"]}</div>', unsafe_allow_html=True)
 
     # Input for new question
-    user_question = st.text_area("Ask a complex question:", 
+    user_question = st.text_area("Ask a question:", 
                                   placeholder="Example: Show me the top 5 clients by MRR growth over the last 6 months and create a trend chart",
                                   key="agentic_input")
 
