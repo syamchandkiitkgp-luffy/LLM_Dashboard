@@ -1191,8 +1191,8 @@ selected_model = st.sidebar.selectbox(
     help="Choose the Gemini model for AI assistant"
 )
 
-GEMINI_API_KEY = "AIzaSyCnu2PemH38f1iF4BdbaLcUbKbJSdxHkRE"
-api_key = "AIzaSyCnu2PemH38f1iF4BdbaLcUbKbJSdxHkRE"
+GEMINI_API_KEY = "AIzaSyBqxxgDhHmvjdAp-KtJk50_2OKauB47790"
+api_key = "AIzaSyBqxxgDhHmvjdAp-KtJk50_2OKauB47790"
 
 min_date = df['month'].min()
 max_date = df['month'].max()
@@ -1688,6 +1688,7 @@ with tab4:
 # Footer
 st.markdown("---")
 st.markdown(f"**Data Range:** {filtered_df['month'].min().strftime('%B %Y')} to {filtered_df['month'].max().strftime('%B %Y')} | **Total Records:** {len(filtered_df):,} | **Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
 
 
 
