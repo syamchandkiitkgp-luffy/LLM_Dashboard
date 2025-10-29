@@ -1126,7 +1126,24 @@ st.markdown("""
             background: white !important;
         }
     }
-    </style>
+    
+    /* Compact metrics for single row */
+    .stMetric {
+        padding: 0.8rem !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.5rem !important;
+    }
+
+    [data-testid="stMetricLabel"] {
+        font-size: 0.75rem !important;
+    }
+
+    [data-testid="stMetricDelta"] {
+        font-size: 0.8rem !important;
+    }
+</style>
 """, unsafe_allow_html=True)
 
 # Load or generate data
@@ -1174,7 +1191,7 @@ selected_model = st.sidebar.selectbox(
     help="Choose the Gemini model for AI assistant"
 )
 
-# API Key (hidden from UI, set in environment or code)
+# API Key (from environment)
 api_key = os.getenv("GEMINI_API_KEY", "AIzaSyCnu2PemH38f1iF4BdbaLcUbKbJSdxHkRE")
 
 min_date = df['month'].min()
@@ -1244,7 +1261,7 @@ users_change = ((current_users - prev_users) / prev_users * 100) if prev_users >
 health_change = current_health - prev_health
 
 # First row of metrics
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 with col1:
     st.metric("Total MRR", f"${current_mrr:,.0f}", delta=f"{mrr_change:.1f}%")
@@ -1256,7 +1273,6 @@ with col3:
     st.metric("Active Customers", f"{current_customers}", delta=f"{customers_change:+d}")
 
 # Second row of metrics
-col4, col5, col6 = st.columns(3)
 
 with col4:
     st.metric("Avg Coverage", f"{current_coverage:.1f}x", delta=f"{coverage_change:.1f}%")
@@ -1593,8 +1609,8 @@ with tab4:
 
         # # Show result
         # if interaction["results"].get("result_df") is not None:
-            # st.markdown("### 📊 Data Result")
-            # st.dataframe(interaction["results"]["result_df"].head(20), use_container_width=True)
+        #     st.markdown("### 📊 Data Result")
+        #     st.dataframe(interaction["results"]["result_df"].head(20), use_container_width=True)
 
         # Show visualization
         if interaction["results"].get("visualization"):
