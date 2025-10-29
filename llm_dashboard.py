@@ -1182,10 +1182,10 @@ st.sidebar.header("🔍 Filters")
 # Gemini Model Selection
 selected_model = st.sidebar.selectbox(
     "🤖 Select Gemini Model",
-    [
-        "gemini-2.0-flash-exp",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash"
+    [   "gemini-2.5-pro",
+        "gemini-2.5-flash-preview-09-2025",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite"
     ],
     index=0,
     help="Choose the Gemini model for AI assistant"
@@ -1696,5 +1696,6 @@ with tab4:
 # Footer
 st.markdown("---")
 st.markdown(f"**Data Range:** {filtered_df['month'].min().strftime('%B %Y')} to {filtered_df['month'].max().strftime('%B %Y')} | **Total Records:** {len(filtered_df):,} | **Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
 
 
